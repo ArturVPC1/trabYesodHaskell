@@ -18,6 +18,7 @@ import Database.Persist.Sqlite
 import Database.Persist.Sql (fromSqlKey, toSqlKey, ToBackendKey)
 import Control.Monad.Logger (runStderrLoggingT)
 import Control.Monad.IO.Class (liftIO)
+import System.Environment (lookupEnv)
 import Data.Int (Int64)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
@@ -30,6 +31,9 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Aeson (FromJSON(..), withObject, (.:?), (.!=), eitherDecode)
 import Network.HTTP.Simple (parseRequest, httpLBS, getResponseBody, Response)
 
+-- ---------------------------------------------------------------
+-- Modelo de dados (7 tabelas)
+-- ---------------------------------------------------------------
 share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
 Escola
     nome Text
@@ -78,6 +82,9 @@ AgendamentoAluno
     deriving Show
 |]
 
+-- ---------------------------------------------------------------
+-- Fundação do Yesod
+-- ---------------------------------------------------------------
 data App = App
     { appPool :: ConnectionPool
     }
@@ -138,6 +145,9 @@ instance YesodPersist App where
 instance RenderMessage App FormMessage where
     renderMessage _ _ = defaultFormMessage
 
+-- ---------------------------------------------------------------
+-- Página inicial
+-- ---------------------------------------------------------------
 getHomeR :: Handler Html
 getHomeR = defaultLayout $ do
     setTitle "Agendamento de Salas"
@@ -146,6 +156,11 @@ getHomeR = defaultLayout $ do
         <p>Sistema de agendamento de salas para a escola de música.
     |]
 
+-- ---------------------------------------------------------------
+-- Auxiliares
+-- ---------------------------------------------------------------
+
+-- | Lê um campo de texto obrigatório (sem espaços nas pontas).
 campo :: Text -> Handler (Maybe Text)
 campo nome = do
     valor <- runInputPost (iopt textField nome)
@@ -153,12 +168,17 @@ campo nome = do
         Just t | not (T.null t) -> Just t
         _ -> Nothing
 
+-- | Converte um inteiro do formulário em chave do banco.
 chaveDe :: ToBackendKey SqlBackend a => Int64 -> Key a
 chaveDe = toSqlKey
 
+-- | Define uma mensagem de feedback e redireciona.
 msgRedirect :: Text -> Route App -> Handler a
 msgRedirect m r = setMessage (toHtml m) >> redirect r
 
+-- ---------------------------------------------------------------
+-- Integração com API externa: ViaCEP (https://viacep.com.br)
+-- ---------------------------------------------------------------
 data ViaCepResp = ViaCepResp
     { vcErro       :: Bool
     , vcLogradouro :: Text
@@ -175,6 +195,7 @@ instance FromJSON ViaCepResp where
         <*> (o .:? "localidade" .!= "")
         <*> (o .:? "uf" .!= "")
 
+-- | Consulta o CEP na API e devolve o endereço, ou uma mensagem de erro.
 buscarCep :: Text -> Handler (Either Text ViaCepResp)
 buscarCep cep
     | T.length digitos /= 8 = return (Left "CEP inválido: informe 8 dígitos.")
@@ -191,6 +212,9 @@ buscarCep cep
     digitos = T.filter isDigit cep
     url = "https://viacep.com.br/ws/" ++ T.unpack digitos ++ "/json/"
 
+-- ---------------------------------------------------------------
+-- Escolas (endereço preenchido pelo CEP)
+-- ---------------------------------------------------------------
 getEscolasR :: Handler Html
 getEscolasR = do
     escolas <- runDB $ selectList [] [Asc EscolaNome]
@@ -241,6 +265,9 @@ postEscolaExcluirR eid = do
             runDB $ delete eid
             msgRedirect "Escola excluída." EscolasR
 
+-- ---------------------------------------------------------------
+-- Instrumentos (cadastro e listagem)
+-- ---------------------------------------------------------------
 getInstrumentosR :: Handler Html
 getInstrumentosR = do
     instrs <- runDB $ selectList [] [Asc InstrumentoNome]
@@ -266,6 +293,11 @@ postInstrumentosR = do
             runDB $ insert_ (Instrumento nome)
             msgRedirect "Instrumento cadastrado." InstrumentosR
 
+-- ---------------------------------------------------------------
+-- Professores
+-- ---------------------------------------------------------------
+
+-- | Lista de professores com o nome do instrumento que ensinam.
 professoresComInstrumento :: Handler [(ProfessorId, Professor, Text)]
 professoresComInstrumento = do
     ps <- runDB $ selectList [] [Asc ProfessorNome]
@@ -273,6 +305,7 @@ professoresComInstrumento = do
             i <- runDB $ get404 (professorInstrumentoId p)
             return (pid, p, instrumentoNome i)) ps
 
+-- | Lê nome, e-mail e instrumento do formulário de professor.
 lerProfessor :: Handler (Maybe (Text, Text, InstrumentoId))
 lerProfessor = do
     mnome <- campo "nome"
@@ -358,6 +391,11 @@ postProfessorExcluirR pid = do
             runDB $ delete pid
             msgRedirect "Professor excluído." ProfessoresR
 
+-- ---------------------------------------------------------------
+-- Alunos
+-- ---------------------------------------------------------------
+
+-- | Lê nome, e-mail e telefone do formulário de aluno.
 lerAluno :: Handler (Maybe (Text, Text, Text))
 lerAluno = do
     mnome <- campo "nome"
@@ -428,10 +466,16 @@ postAlunoEditarR aid = do
 postAlunoExcluirR :: AlunoId -> Handler Html
 postAlunoExcluirR aid = do
     runDB $ do
+        -- remove a participação do aluno nos agendamentos antes de excluí-lo
         deleteWhere [AgendamentoAlunoAlunoId ==. aid]
         delete aid
     msgRedirect "Aluno excluído." AlunosR
 
+-- ---------------------------------------------------------------
+-- Salas
+-- ---------------------------------------------------------------
+
+-- | Lista de salas com o nome da escola onde ficam.
 salasComEscola :: Handler [(SalaId, Sala, Text)]
 salasComEscola = do
     ss <- runDB $ selectList [] [Asc SalaNome]
@@ -439,6 +483,7 @@ salasComEscola = do
             e <- runDB $ get404 (salaEscolaId s)
             return (sid, s, escolaNome e)) ss
 
+-- | Lê nome, capacidade e escola do formulário de sala.
 lerSala :: Handler (Maybe (Text, Int, EscolaId))
 lerSala = do
     mnome <- campo "nome"
@@ -524,6 +569,11 @@ postSalaExcluirR sid = do
             runDB $ delete sid
             msgRedirect "Sala excluída." SalasR
 
+-- ---------------------------------------------------------------
+-- Agendamentos
+-- ---------------------------------------------------------------
+
+-- | Dados de um agendamento já com nomes resolvidos para exibição.
 data AgendamentoView = AgendamentoView
     { avId         :: AgendamentoId
     , avSala       :: Text
@@ -552,6 +602,7 @@ montarAgendamento (Entity aid a) = runDB $ do
         , avAlunos = map alunoNome alunos
         }
 
+-- | Lê o formulário de agendamento. Retorna Nothing se algum campo estiver faltando.
 lerAgendamento :: Handler (Maybe (SalaId, ProfessorId, Day, Int, Int, Text, [AlunoId]))
 lerAgendamento = do
     msala <- runInputPost (iopt intField "sala")
@@ -567,6 +618,8 @@ lerAgendamento = do
             Just (chaveDe (fromIntegral s), chaveDe (fromIntegral p), d, i, f, fin, alunos)
         _ -> Nothing
 
+-- | Verifica se o horário choca com outro agendamento da mesma sala ou do mesmo professor.
+-- Dois intervalos se sobrepõem quando inicio < fimExistente e fim > inicioExistente.
 temConflito :: SalaId -> ProfessorId -> Day -> Int -> Int -> Handler Bool
 temConflito sid pid d ini fim = runDB $ do
     porSala <- count [ AgendamentoSalaId ==. sid, AgendamentoDataAula ==. d
@@ -652,7 +705,12 @@ postAgendamentoExcluirR aid = do
         delete aid
     msgRedirect "Agendamento cancelado." AgendamentosR
 
+-- ---------------------------------------------------------------
+-- Inicialização
+-- ---------------------------------------------------------------
 main :: IO ()
 main = runStderrLoggingT $ withSqlitePool "agendamento.sqlite3" 10 $ \pool -> liftIO $ do
     runSqlPool (runMigration migrateAll) pool
-    warp 3000 (App pool)
+    portStr <- lookupEnv "PORT"
+    let port = maybe 3000 read portStr
+    warp port (App pool)
