@@ -3,6 +3,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     ghc libghc-yesod-dev libghc-persistent-sqlite-dev \
     libghc-persistent-template-dev libghc-http-conduit-dev \
     libghc-aeson-dev libghc-yesod-form-dev \
