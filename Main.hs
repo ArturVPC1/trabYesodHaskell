@@ -122,14 +122,20 @@ $doctype 5
         <title>#{pageTitle pc}
         ^{pageHead pc}
     <body>
-        <nav>
+                <nav>
             <a href=@{HomeR}>Início
-            \ | <a href=@{EscolasR}>Escolas
-            \ | <a href=@{InstrumentosR}>Instrumentos
-            \ | <a href=@{ProfessoresR}>Professores
-            \ | <a href=@{AlunosR}>Alunos
-            \ | <a href=@{SalasR}>Salas
-            \ | <a href=@{AgendamentosR}>Agendamentos
+            \ |
+            <a href=@{EscolasR}>Escolas
+            \ |
+            <a href=@{InstrumentosR}>Instrumentos
+            \ |
+            <a href=@{ProfessoresR}>Professores
+            \ |
+            <a href=@{AlunosR}>Alunos
+            \ |
+            <a href=@{SalasR}>Salas
+            \ |
+            <a href=@{AgendamentosR}>Agendamentos
         <main>
             $maybe msg <- mmsg
                 <p .mensagem>#{msg}
