@@ -93,6 +93,11 @@ mkYesod "App" [parseRoutes|
 /alunos                   AlunosR           GET POST
 /alunos/#AlunoId/editar   AlunoEditarR      GET POST
 /alunos/#AlunoId/excluir  AlunoExcluirR     POST
+/salas                    SalasR            GET POST
+/salas/#SalaId/editar     SalaEditarR       GET POST
+/salas/#SalaId/excluir    SalaExcluirR      POST
+/agendamentos             AgendamentosR     GET POST
+/agendamentos/#AgendamentoId/excluir AgendamentoExcluirR POST
 |]
 
 instance Yesod App where
@@ -116,6 +121,8 @@ $doctype 5
             \ | <a href=@{InstrumentosR}>Instrumentos
             \ | <a href=@{ProfessoresR}>Professores
             \ | <a href=@{AlunosR}>Alunos
+            \ | <a href=@{SalasR}>Salas
+            \ | <a href=@{AgendamentosR}>Agendamentos
         <main>
             $maybe msg <- mmsg
                 <p .mensagem>#{msg}
@@ -424,6 +431,226 @@ postAlunoExcluirR aid = do
         deleteWhere [AgendamentoAlunoAlunoId ==. aid]
         delete aid
     msgRedirect "Aluno excluído." AlunosR
+
+salasComEscola :: Handler [(SalaId, Sala, Text)]
+salasComEscola = do
+    ss <- runDB $ selectList [] [Asc SalaNome]
+    mapM (\(Entity sid s) -> do
+            e <- runDB $ get404 (salaEscolaId s)
+            return (sid, s, escolaNome e)) ss
+
+lerSala :: Handler (Maybe (Text, Int, EscolaId))
+lerSala = do
+    mnome <- campo "nome"
+    mcap <- runInputPost (iopt intField "capacidade")
+    mesc <- runInputPost (iopt intField "escola")
+    return $ case (mnome, mcap, mesc) of
+        (Just n, Just c, Just e) | c > 0 -> Just (n, c, chaveDe (fromIntegral e))
+        _ -> Nothing
+
+formSala :: Route App -> Maybe Sala -> [Entity Escola] -> Widget
+formSala acao ms escolas = [whamlet|
+    <form method=post action=@{acao}>
+        <label>Nome <input name=nome required value=#{maybe "" salaNome ms}>
+        <label>Capacidade <input name=capacidade type=number min=1 required value=#{maybe "" (show . salaCapacidade) ms}>
+        <label>Escola
+            <select name=escola required>
+                $forall Entity eid e <- escolas
+                    <option value=#{show (fromSqlKey eid)} :isE eid:selected>#{escolaNome e}
+        <button>Salvar
+|]
+  where
+    isE eid = maybe False (\s -> salaEscolaId s == eid) ms
+
+getSalasR :: Handler Html
+getSalasR = do
+    lista <- salasComEscola
+    escolas <- runDB $ selectList [] [Asc EscolaNome]
+    defaultLayout $ do
+        setTitle "Salas"
+        [whamlet|
+            <h1>Salas
+            <table>
+                <tr><th>Nome<th>Capacidade<th>Escola<th>Ações
+                $forall (sid, s, eNome) <- lista
+                    <tr>
+                        <td>#{salaNome s}
+                        <td>#{salaCapacidade s}
+                        <td>#{eNome}
+                        <td>
+                            <a href=@{SalaEditarR sid}>Editar
+                            <form method=post action=@{SalaExcluirR sid} .inline>
+                                <button>Excluir
+            <h2>Cadastrar sala
+            ^{formSala SalasR Nothing escolas}
+        |]
+
+postSalasR :: Handler Html
+postSalasR = do
+    dados <- lerSala
+    case dados of
+        Nothing -> msgRedirect "Preencha todos os campos com valores válidos." SalasR
+        Just (n, c, e) -> do
+            runDB $ insert_ (Sala n c e)
+            msgRedirect "Sala cadastrada." SalasR
+
+getSalaEditarR :: SalaId -> Handler Html
+getSalaEditarR sid = do
+    s <- runDB $ get404 sid
+    escolas <- runDB $ selectList [] [Asc EscolaNome]
+    defaultLayout $ do
+        setTitle "Editar sala"
+        [whamlet|
+            <h1>Editar sala
+            ^{formSala (SalaEditarR sid) (Just s) escolas}
+        |]
+
+postSalaEditarR :: SalaId -> Handler Html
+postSalaEditarR sid = do
+    _ <- runDB $ get404 sid
+    dados <- lerSala
+    case dados of
+        Nothing -> msgRedirect "Preencha todos os campos com valores válidos." (SalaEditarR sid)
+        Just (n, c, e) -> do
+            runDB $ update sid [SalaNome =. n, SalaCapacidade =. c, SalaEscolaId =. e]
+            msgRedirect "Sala atualizada." SalasR
+
+postSalaExcluirR :: SalaId -> Handler Html
+postSalaExcluirR sid = do
+    temAgendamentos <- runDB $ count [AgendamentoSalaId ==. sid]
+    if temAgendamentos > 0
+        then msgRedirect "Não é possível excluir: a sala possui agendamentos." SalasR
+        else do
+            runDB $ delete sid
+            msgRedirect "Sala excluída." SalasR
+
+data AgendamentoView = AgendamentoView
+    { avId         :: AgendamentoId
+    , avSala       :: Text
+    , avProfessor  :: Text
+    , avData       :: Day
+    , avInicio     :: Int
+    , avFim        :: Int
+    , avFinalidade :: Text
+    , avAlunos     :: [Text]
+    }
+
+montarAgendamento :: Entity Agendamento -> Handler AgendamentoView
+montarAgendamento (Entity aid a) = runDB $ do
+    s <- get404 (agendamentoSalaId a)
+    p <- get404 (agendamentoProfessorId a)
+    vinculos <- selectList [AgendamentoAlunoAgendamentoId ==. aid] []
+    alunos <- mapM (get404 . agendamentoAlunoAlunoId . entityVal) vinculos
+    return AgendamentoView
+        { avId = aid
+        , avSala = salaNome s
+        , avProfessor = professorNome p
+        , avData = agendamentoDataAula a
+        , avInicio = agendamentoHoraInicio a
+        , avFim = agendamentoHoraFim a
+        , avFinalidade = agendamentoFinalidade a
+        , avAlunos = map alunoNome alunos
+        }
+
+lerAgendamento :: Handler (Maybe (SalaId, ProfessorId, Day, Int, Int, Text, [AlunoId]))
+lerAgendamento = do
+    msala <- runInputPost (iopt intField "sala")
+    mprof <- runInputPost (iopt intField "professor")
+    mdata <- runInputPost (iopt dayField "data")
+    mini  <- runInputPost (iopt intField "inicio")
+    mfim  <- runInputPost (iopt intField "fim")
+    mfin  <- campo "finalidade"
+    alunosTxt <- lookupPostParams "alunos"
+    let alunos = map chaveDe $ mapMaybe (readMaybe . T.unpack) alunosTxt
+    return $ case (msala, mprof, mdata, mini, mfim, mfin) of
+        (Just s, Just p, Just d, Just i, Just f, Just fin) | not (null alunos) ->
+            Just (chaveDe (fromIntegral s), chaveDe (fromIntegral p), d, i, f, fin, alunos)
+        _ -> Nothing
+
+temConflito :: SalaId -> ProfessorId -> Day -> Int -> Int -> Handler Bool
+temConflito sid pid d ini fim = runDB $ do
+    porSala <- count [ AgendamentoSalaId ==. sid, AgendamentoDataAula ==. d
+                     , AgendamentoHoraInicio <. fim, AgendamentoHoraFim >. ini ]
+    porProf <- count [ AgendamentoProfessorId ==. pid, AgendamentoDataAula ==. d
+                     , AgendamentoHoraInicio <. fim, AgendamentoHoraFim >. ini ]
+    return (porSala + porProf > 0)
+
+formAgendamento :: [Entity Sala] -> [Entity Professor] -> [Entity Aluno] -> Widget
+formAgendamento salas profs alunos = [whamlet|
+    <form method=post action=@{AgendamentosR}>
+        <label>Sala
+            <select name=sala required>
+                $forall Entity sid s <- salas
+                    <option value=#{show (fromSqlKey sid)}>#{salaNome s}
+        <label>Professor
+            <select name=professor required>
+                $forall Entity pid p <- profs
+                    <option value=#{show (fromSqlKey pid)}>#{professorNome p}
+        <label>Data <input name=data type=date required>
+        <label>Início (hora, 0 a 23) <input name=inicio type=number min=0 max=23 required>
+        <label>Fim (hora, 0 a 23) <input name=fim type=number min=0 max=23 required>
+        <label>Finalidade <input name=finalidade required placeholder="Ex.: aula de violão">
+        <fieldset>
+            <legend>Alunos
+            $forall Entity aid a <- alunos
+                <label .inline>
+                    <input type=checkbox name=alunos value=#{show (fromSqlKey aid)}>
+                    #{alunoNome a}
+        <button>Agendar
+|]
+
+getAgendamentosR :: Handler Html
+getAgendamentosR = do
+    ags <- runDB $ selectList [] [Asc AgendamentoDataAula, Asc AgendamentoHoraInicio]
+    views <- mapM montarAgendamento ags
+    salas <- runDB $ selectList [] [Asc SalaNome]
+    profs <- runDB $ selectList [] [Asc ProfessorNome]
+    alunos <- runDB $ selectList [] [Asc AlunoNome]
+    defaultLayout $ do
+        setTitle "Agendamentos"
+        [whamlet|
+            <h1>Agendamentos
+            <table>
+                <tr><th>Data<th>Horário<th>Sala<th>Professor<th>Alunos<th>Finalidade<th>Ações
+                $forall av <- views
+                    <tr>
+                        <td>#{show (avData av)}
+                        <td>#{avInicio av}h às #{avFim av}h
+                        <td>#{avSala av}
+                        <td>#{avProfessor av}
+                        <td>#{T.intercalate ", " (avAlunos av)}
+                        <td>#{avFinalidade av}
+                        <td>
+                            <form method=post action=@{AgendamentoExcluirR (avId av)} .inline>
+                                <button>Cancelar
+            <h2>Novo agendamento
+            ^{formAgendamento salas profs alunos}
+        |]
+
+postAgendamentosR :: Handler Html
+postAgendamentosR = do
+    dados <- lerAgendamento
+    case dados of
+        Nothing -> msgRedirect "Preencha todos os campos e selecione ao menos um aluno." AgendamentosR
+        Just (sid, pid, d, ini, fim, fin, alunosIds)
+            | ini < 0 || fim > 23 || ini >= fim ->
+                msgRedirect "Horário inválido: o início deve ser anterior ao fim (0 a 23h)." AgendamentosR
+            | otherwise -> do
+                conflito <- temConflito sid pid d ini fim
+                if conflito
+                    then msgRedirect "Conflito: a sala ou o professor já possui agendamento neste horário." AgendamentosR
+                    else do
+                        runDB $ do
+                            aid <- insert (Agendamento sid pid d ini fim fin)
+                            mapM_ (\alid -> insert (AgendamentoAluno aid alid)) alunosIds
+                        msgRedirect "Agendamento criado." AgendamentosR
+
+postAgendamentoExcluirR :: AgendamentoId -> Handler Html
+postAgendamentoExcluirR aid = do
+    runDB $ do
+        deleteWhere [AgendamentoAlunoAgendamentoId ==. aid]
+        delete aid
+    msgRedirect "Agendamento cancelado." AgendamentosR
 
 main :: IO ()
 main = runStderrLoggingT $ withSqlitePool "agendamento.sqlite3" 10 $ \pool -> liftIO $ do
